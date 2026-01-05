@@ -1,7 +1,16 @@
+# Python
 __pycache__/
 *.pyc
-.env
-.env.*
-*.log
-.db
-node_modules/
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# Databases
+*.db
+
+# OS
+.DS_Store
+
