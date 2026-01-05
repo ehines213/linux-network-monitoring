@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Linux Network Monitoring Platform</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
+    header { display:flex; align-items:baseline; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+    .muted { color:#555; font-size: 0.95rem; }
+    .grid { display:grid; grid-template-columns: 1fr; gap: 18px; margin-top: 16px; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 14px; }
+    .row { display:flex; gap: 12px; flex-wrap: wrap; align-items:center; }
+    label { font-weight: 600; }
+    select, input { padding: 6px 8px; }
+    table { width:100%; border-collapse: collapse; font-size: 0.95rem; }
+    th, td { border-bottom: 1px solid #eee; padding: 8px 6px; text-align:left; }
+    th { background: #fafafa; }
+    .pill { display:inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid #ddd; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1 style="margin:0;">Network Monitoring Dashboard</h1>
+      <div class="muted">Auto-refreshes. Data source: <code>/latest</code></div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="hostSelect">Host</label><br/>
+        <select id="hostSelect"></select>
+      </div>
+      <div>
+        <label for="limitInput">Points</label><br/>
+        <input id="limitInput" type="number" min="10" max="500" value="120" />
+      </div>
+      <div>
+        <label for="refreshInput">Refresh (sec)</label><br/>
+        <input id="refreshInput" type="number" min="2" max="120" value="10" />
+      </div>
+      <button id="refreshBtn" style="padding:10px 12px;">Refresh now</button>
+    </div>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <div class="row" style="justify-content:space-between;">
+        <div><strong>Status</strong> <span id="statusPill" class="pill">Loading…</span></div>
+        <div class="muted">Last updated: <span id="lastUpdated">—</span></div>
+      </div>
+     
+ <div id="alertsBox"
+       style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px;">
+    <strong>Alerts</strong>
+    <div id="alertsBody" class="muted">No alerts.</div>
+  </div>
+
+      <div class="muted" style="margin-top:8px;">
+        Tip: If multiple hosts appear later, pick a host to filter charts.
+      </div>
+    </div>
+
+    <div class="card">
+      <canvas id="utilChart"></canvas>
+    </div>
+
+    <div class="card">
+      <canvas id="netChart"></canvas>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between;">
+        <strong>Latest samples</strong>
+        <span class="muted">Showing most recent rows</span>
+      </div>
+      <div style="overflow:auto; margin-top:10px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Timestamp (UTC)</th>
+              <th>Host</th>
+              <th>CPU %</th>
+              <th>Mem %</th>
+              <th>Disk %</th>
+              <th>RX kbps</th>
+              <th>TX kbps</th>
+              <th>Ping ms</th>
+            </tr>
+          </thead>
+          <tbody id="latestBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const hostSelect = document.getElementById("hostSelect");
+  const limitInput = document.getElementById("limitInput");
+  const refreshInput = document.getElementById("refreshInput");
+  const refreshBtn = document.getElementById("refreshBtn");
+  const statusPill = document.getElementById("statusPill");
+  const lastUpdated = document.getElementById("lastUpdated");
+  const latestBody = document.getElementById("latestBody");
+  const API_BASE = "http://127.0.0.1:8000";
+  const alertsBox = document.getElementById("alertsBox");
+  const alertsBody = document.getElementById("alertsBody");
+
+  let utilChart, netChart;
+  let timer = null;
+
+  function fmt(n) {
+    if (n === null || n === undefined) return "—";
+    return (Math.round(n * 10) / 10).toString();
+  }
+
+  function setStatus(ok, text) {
+    statusPill.textContent = text;
+    statusPill.style.background = ok ? "#f0fff4" : "#fff5f5";
+    statusPill.style.borderColor = ok ? "#b7ebc6" : "#f5c2c7";
+  }
+
+  async function fetchLatest(limit) {
+    const res = await fetch(`${API_BASE}/latest?limit=${limit}`, {
+       headers: { "Accept": "application/json" }
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+  return await res.json();
+}
+
+
+
+  function uniqueHosts(rows) {
+    const s = new Set(rows.map(r => r.host));
+    return Array.from(s).sort();
+  }
+
+  function ensureHostOptions(hosts) {
+    const current = hostSelect.value;
+    hostSelect.innerHTML = "";
+    for (const h of hosts) {
+      const opt = document.createElement("option");
+      opt.value = h;
+      opt.textContent = h;
+      hostSelect.appendChild(opt);
+    }
+    if (hosts.includes(current)) {
+       hostSelect.value = current;
+    } else {
+     hostSelect.value = hosts[0];
+    }
+  }
+
+  function filterByHost(rows, host) {
+    return rows.filter(r => r.host === host);
+  }
+
+  function buildCharts(labels, cpu, mem, disk, rx, tx, ping) {
+    const utilCtx = document.getElementById("utilChart").getContext("2d");
+    const netCtx = document.getElementById("netChart").getContext("2d");
+
+    if (utilChart) utilChart.destroy();
+    if (netChart) netChart.destroy();
+
+    utilChart = new Chart(utilCtx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          { label: "CPU %", data: cpu, tension: 0.2 },
+          { label: "Mem %", data: mem, tension: 0.2 },
+          { label: "Disk %", data: disk, tension: 0.2 },
+          { label: "Ping ms", data: ping, tension: 0.2 }
+        ]
+      },
+      options: {
+        responsive: true,
+        interaction: { mode: "index", intersect: false },
+        scales: { y: { beginAtZero: true } }
+      }
+    });
+
+    netChart = new Chart(netCtx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          { label: "RX kbps", data: rx, tension: 0.2 },
+          { label: "TX kbps", data: tx, tension: 0.2 }
+        ]
+      },
+      options: {
+        responsive: true,
+        interaction: { mode: "index", intersect: false },
+        scales: { y: { beginAtZero: true } }
+      }
+    });
+  }
+
+  function renderTable(rows) {
+  latestBody.innerHTML = "";
+  for (const r of rows.slice(0, 15)) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><code>${r.ts}</code></td>
+      <td>${r.host}</td>
+      <td>${fmt(r.cpu_pct)}</td>
+      <td>${fmt(r.mem_pct)}</td>
+      <td>${fmt(r.disk_pct)}</td>
+      <td>${fmt(r.rx_kbps)}</td>
+      <td>${fmt(r.tx_kbps)}</td>
+      <td>${fmt(r.ping_ms)}</td>
+    `;
+    latestBody.appendChild(tr);
+  }
+}
+
+const THRESH = {
+  cpu_warn: 70,  cpu_crit: 90,
+  mem_warn: 75,  mem_crit: 90,
+  disk_warn: 85, disk_crit: 95,
+  ping_warn: 120, ping_crit: 250
+};
+
+function computeAlerts(latestRow) {
+  if (!latestRow) return [];
+
+  const a = [];
+  const push = (sev, msg) => a.push({ sev, msg });
+
+  const cpu = latestRow.cpu_pct;
+  const mem = latestRow.mem_pct;
+  const disk = latestRow.disk_pct;
+  const ping = latestRow.ping_ms;
+
+  if (cpu >= THRESH.cpu_crit) push("CRIT", `CPU ${fmt(cpu)}% (>= ${THRESH.cpu_crit})`);
+  else if (cpu >= THRESH.cpu_warn) push("WARN", `CPU ${fmt(cpu)}% (>= ${THRESH.cpu_warn})`);
+
+  if (mem >= THRESH.mem_crit) push("CRIT", `Mem ${fmt(mem)}% (>= ${THRESH.mem_crit})`);
+  else if (mem >= THRESH.mem_warn) push("WARN", `Mem ${fmt(mem)}% (>= ${THRESH.mem_warn})`);
+
+  if (disk >= THRESH.disk_crit) push("CRIT", `Disk ${fmt(disk)}% (>= ${THRESH.disk_crit})`);
+  else if (disk >= THRESH.disk_warn) push("WARN", `Disk ${fmt(disk)}% (>= ${THRESH.disk_warn})`);
+
+  // ping_ms can be null
+  if (ping !== null && ping !== undefined) {
+    if (ping >= THRESH.ping_crit) push("CRIT", `Ping ${fmt(ping)} ms (>= ${THRESH.ping_crit})`);
+    else if (ping >= THRESH.ping_warn) push("WARN", `Ping ${fmt(ping)} ms (>= ${THRESH.ping_warn})`);
+  }
+
+  return a;
+}
+
+function renderAlerts(alerts, host) {
+  if (!alertsBox || !alertsBody) return;
+
+  if (!alerts || alerts.length === 0) {
+    alertsBox.style.background = "#f8fff8";
+    alertsBox.style.borderColor = "#b7ebc6";
+    alertsBody.innerHTML = `<div class="muted">OK — ${host}: within thresholds.</div>`;
+    return;
+  }
+
+  const worst = alerts.some(x => x.sev === "CRIT") ? "CRIT" : "WARN";
+  alertsBox.style.background = worst === "CRIT" ? "#fff5f5" : "#fffdf0";
+  alertsBox.style.borderColor = worst === "CRIT" ? "#f5c2c7" : "#ffe58f";
+
+  alertsBody.innerHTML = alerts
+    .map(x => `<div><strong>${x.sev}</strong> — ${host}: ${x.msg}</div>`)
+    .join("");
+}
+
+
+async function refresh() {
+  const limit = Math.max(1, Math.min(500, parseInt(limitInput.value || "120", 10)));
+
+  try {
+    const rows = await fetchLatest(limit);
+
+    if (!rows || rows.length === 0) {
+      setStatus(false, "No data yet");
+      latestBody.innerHTML = "";
+      return;
+    }
+
+    const hosts = uniqueHosts(rows);
+    ensureHostOptions(hosts);
+
+    const selected = hostSelect.value || hosts[0];
+    const filtered = filterByHost(rows, selected);
+
+    // Alerts (use newest sample for this host)
+    const latestForHost = filtered[0];   // filtered is newest->oldest in your code
+    const alerts = computeAlerts(latestForHost);
+    renderAlerts(alerts, selected);
+
+
+    // Build time series (oldest → newest)
+    const ordered = [...filtered].reverse();
+    const labels = ordered.map(r => (r.ts || "").slice(11, 19));
+    const cpu = ordered.map(r => r.cpu_pct);
+    const mem = ordered.map(r => r.mem_pct);
+    const disk = ordered.map(r => r.disk_pct);
+    const rx = ordered.map(r => r.rx_kbps);
+    const tx = ordered.map(r => r.tx_kbps);
+    const ping = ordered.map(r => r.ping_ms);
+
+    buildCharts(labels, cpu, mem, disk, rx, tx, ping);
+    renderTable(rows);
+
+    setStatus(true, `OK • host: ${selected} • samples: ${filtered.length}`);
+    lastUpdated.textContent = new Date().toLocaleString();
+  } catch (e) {
+    console.error(e);
+    setStatus(false, `Error: ${e.message || e}`);
+  }
+}
+
+function restartTimer() {
+  if (timer) clearInterval(timer);
+
+  const sec = Math.max(
+    2,
+    Math.min(3600, parseInt(refreshInput.value || "10", 10))
+  );
+
+  timer = setInterval(refresh, sec * 1000);
+}
+  
+
+// start the dashboard
+refresh();
+restartTimer();
+</script>
