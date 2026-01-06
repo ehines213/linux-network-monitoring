@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 from datetime import datetime, timezone
 import sqlite3
 from pathlib import Path
+import os
 
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -47,9 +48,8 @@ def health():
 
 @app.post("/ingest")
 def ingest(payload: MetricPayload, x_api_key: str | None = Header(default=None)):
-    # Simple auth check (replace with proper secrets mgmt later)
-    expected = "dev-key-change-me"
-    if x_api_key != expected:
+    expected = os.getenv("NETMON_API_KEY", "")
+    if not expected or x_api_key != expected:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     ts = datetime.now(timezone.utc).isoformat()
