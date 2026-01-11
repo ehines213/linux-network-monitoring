@@ -1,4 +1,5 @@
 Overview
+
 This project is a Linux-based network and system monitoring platform designed to provide visibility into system health and basic network connectivity. It uses a lightweight Python agent to collect metrics and exposes them through a FastAPI backend for real-time monitoring and historical review. The platform is intended for small environments, labs, or internal IT operations where simplicity, transparency, and reliability are priorities.
 Features
 Collects system metrics including CPU usage, memory utilization, disk usage, uptime, and hostname
